@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+
+# boilerplate code for loading and processing ibtracs
+
+import pandas as pd
+import geopandas as gpd
+
+df = pd.read_csv("ibtracs.ALL.list.v04r01.csv", usecols=["SID","BASIN","SUBBASIN","NAME","ISO_TIME","NATURE","LAT","LON"])
+df = df.iloc[1:]  # drop first row
+
+gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df["LON"], df["LAT"]), crs="EPSG:4326")
+gdf_merc = gdf.to_crs("EPSG:3857")  # meters
+gdf["buffer_1000km"] = gdf_merc.buffer(1000000).to_crs("EPSG:4326")  # 1000 km
+gdf['year'] = pd.to_datetime(gdf['ISO_TIME']).dt.year
+
+gdf.NATURE.unique()
+#gdf = gdf[gdf.NATURE != 'DS'] # remove disturbances
+gdf = gdf[gdf.NATURE != 'NR'] # remove "not reported"
+gdf.loc[gdf["NATURE"] == "MX", "NATURE"] = "ET" # renamed in place - treating Mixed reports as ET
+# you’re saying: “for rows where NATURE == 'MX', set the NATURE column to 'ET'.”
+# If you omitted the second "NATURE", you’d be targeting whole rows, not just that column.
+gdf.loc[gdf["NATURE"] == "SS", "NATURE"] = "TS" # renamed in place - treating subtropical as tropical
+gdf.loc[gdf["NATURE"] == "DS", "NATURE"] = "TS" # renamed in place - treating disturbances as tropical
+
+gdf["LON"] = pd.to_numeric(gdf["LON"], errors="coerce")
+gdf["LAT"] = pd.to_numeric(gdf["LAT"], errors="coerce")
+
+# Wrap the few entires on 0,360 scale to [-180,180]
+# this leaves the entries the are already on the [-180,180] scale as-is
+gdf["LON"] = ((gdf["LON"] + 180) % 360) - 180
+
+#
+
+# load shapefile of ocean basins
+basins = gpd.read_file("ocean_basins.shp")
+
+#
+
+# associate TCs with ocean basins
+
+import pandas as pd
+import geopandas as gpd
+
+# 1) subset to 1980–2024 (inclusive)
+gdf_sub = gdf[(gdf["year"] >= 1980) & (gdf["year"] <= 2024)].copy()
+
+# make sure timestamps are datetime
+gdf_sub["ISO_TIME"] = pd.to_datetime(gdf_sub["ISO_TIME"])
+
+# 2) for each SID, find the earliest timestamp row (storm origin point)
+idx = gdf_sub.groupby("SID")["ISO_TIME"].idxmin()
+orig = gdf_sub.loc[idx, ["SID", "year", "LAT", "LON", "ISO_TIME"]].copy()
+orig = orig.sort_values(["SID"]).reset_index(drop=True)
+
+# 3) create points from origin lat/lon and spatially join to basins
+tc_points = gpd.GeoDataFrame(
+    orig,
+    geometry=gpd.points_from_xy(orig["LON"], orig["LAT"]),
+    crs=basins.crs,
+)
+
+joined = gpd.sjoin(tc_points, basins, how="left", predicate="within")
+
+missing = joined["name"].isna()
+if missing.any():
+    nearest = gpd.sjoin_nearest(tc_points[missing], basins, how="left")
+    joined.loc[missing, "name"] = nearest.loc[joined.index[missing], "name"].values
+
+# 4) map basin names to numeric codes
+basin_map = {"NATL": 1, "EPAC": 2, "WPAC": 3}
+joined["ocean_basin"] = joined["name"].map(basin_map)
+
+# 5) final output: one row per unique SID, year, basin code
+out_df = joined[["SID", "year", "ocean_basin"]].copy()
+out_df = out_df.sort_values(["year", "SID"]).reset_index(drop=True)
+
+# plot NATL timeseries
+
+import matplotlib.pyplot as plt
+import pymannkendall as mk
+
+# subset to NATL storms
+natl_df = out_df[out_df["ocean_basin"] == 1]
+
+# count storms per year
+natl_counts = (
+    natl_df.groupby("year")["SID"]
+    .nunique()
+    .sort_index()
+)
+
+# ---- Mann–Kendall trend test ----
+mk_result = mk.original_test(natl_counts.values)
+pval = mk_result.p
+
+# plot
+fig, ax = plt.subplots(figsize=(11, 7))
+
+ax.plot(
+    natl_counts.index,
+    natl_counts.values,
+    color="tab:brown",
+    linewidth=2,
+)
+
+# labels and title
+ax.set_title("NATL TCs", fontsize=24)
+# ax.set_xlabel("Year", fontsize=16)
+ax.set_ylabel("Number of TCs", fontsize=20)
+
+# ticks
+ax.tick_params(axis="both", labelsize=20)
+
+# ---- annotation (upper left, axes coords) ----
+ax.text(
+    0.02,
+    0.95,
+    f"slope = {mk_result.slope:.2g}\n"
+    f"pval = {mk_result.p:.2g}",
+    transform=ax.transAxes,
+    fontsize=20,
+    va="top",
+    ha="left",
+)
+
+# plot EPAC timeseries
+
+import matplotlib.pyplot as plt
+import pymannkendall as mk
+
+# subset to NATL storms
+epac_df = out_df[out_df["ocean_basin"] == 2]
+
+# count storms per year
+epac_counts = (
+    epac_df.groupby("year")["SID"]
+    .nunique()
+    .sort_index()
+)
+
+# ---- Mann–Kendall trend test ----
+mk_result = mk.original_test(epac_counts.values)
+pval = mk_result.p
+
+# plot
+fig, ax = plt.subplots(figsize=(11, 7))
+
+ax.plot(
+    epac_counts.index,
+    epac_counts.values,
+    color="tab:brown",
+    linewidth=2,
+)
+
+# labels and title
+ax.set_title("EPAC TCs", fontsize=24)
+# ax.set_xlabel("Year", fontsize=16)
+ax.set_ylabel("Number of TCs", fontsize=20)
+
+# ticks
+ax.tick_params(axis="both", labelsize=20)
+
+# ---- annotation (upper left, axes coords) ----
+ax.text(
+    0.02,
+    0.95,
+    f"slope = {mk_result.slope:.2g}\n"
+    f"pval = {mk_result.p:.2g}",
+    transform=ax.transAxes,
+    fontsize=20,
+    va="top",
+    ha="left",
+)
+
+# timeseries of TCs in climate regions
+
+import pandas as pd
+from pathlib import Path
+import matplotlib.pyplot as plt
+import pymannkendall as mk
+from scipy.stats import pearsonr
+
+base_dir = Path("/Users/dkalashnikov/Desktop/tc_precip")
+
+region_name_map = {
+    1: "NW",
+    2: "W",
+    3: "NR&P",
+    4: "SW",
+    5: "S",
+    6: "UM",
+    7: "OV",
+    8: "SE",
+    9: "NE",
+}
+
+natl_counts = natl_counts.values
+epac_counts = epac_counts.values
+
+fig, axes = plt.subplots(3, 3, figsize=(15, 10), sharex=True, sharey=True)
+axes = axes.ravel()
+
+for region_id in range(1, 10):
+    csv_path = base_dir / f"all_tc_combined_{region_id}.csv"
+    df = pd.read_csv(csv_path)
+
+    df = df.dropna(subset=["SID"]).copy()
+
+    # count unique SIDs per year
+    counts = df.groupby("year")["SID"].nunique()
+
+    year_index = pd.Index(
+        range(1980, 2025),
+        name="year",
+    )
+    counts = counts.reindex(year_index, fill_value=0)
+
+    # MK test + Sen's slope
+    mk_result = mk.original_test(counts.values)
+
+    # Pearson correlations vs basin-total activity
+
+    r_natl, p_natl = pearsonr(counts.values, natl_counts)
+    r_epac, p_epac = pearsonr(counts.values, epac_counts)
+
+    r_natl_star = "*" if p_natl < 0.05 else ""
+    r_epac_star = "*" if p_epac < 0.05 else ""
+
+    ax = axes[region_id - 1]
+    ax.plot(counts.index, counts.values, color="orangered", linewidth=1.8)
+
+    ax.set_title(region_name_map[region_id], fontsize=14)
+    ax.set_ylabel("Number of TCs", fontsize=12)
+
+    # UPDATED: y-axis lower bound = -1, ticks unchanged
+    ax.set_ylim(-0.5, 10)
+    ax.set_yticks([0, 2, 4, 6, 8, 10])
+
+    ax.tick_params(axis="both", labelsize=10, labelbottom=True, labelleft=True)
+
+    # text box 1: MK + Sen
+    ax.text(
+        0.02,
+        0.96,
+        f"slope = {mk_result.slope:.2g}\n"
+        f"pval = {mk_result.p:.2f}",
+        transform=ax.transAxes,
+        fontsize=10,
+        va="top",
+        ha="left",
+        bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="none", alpha=0.9),
+    )
+
+    # text box 2: Pearson r
+    if region_id > 3: # don't plot for first 3 regions
+        ax.text(
+            0.34,
+            0.98,
+            r"$\mathrm{r}(\mathrm{TC}_{\mathrm{ALL}},\,\mathrm{TC}_{\mathrm{NATL}})$ = "
+            + f"{r_natl:.2f}{r_natl_star}\n"
+            r"$\mathrm{r}(\mathrm{TC}_{\mathrm{ALL}},\,\mathrm{TC}_{\mathrm{EPAC}})$ = "
+            + f"{r_epac:.2f}{r_epac_star}",
+            transform=ax.transAxes,
+            fontsize=10,
+            va="top",
+            ha="left",
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="none", alpha=0.9),
+        )
+
+fig.subplots_adjust(wspace=0.35, hspace=0.45)
