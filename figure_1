@@ -1,0 +1,675 @@
+#!/usr/bin/env python3 
+
+# panel A
+
+# make Milton plot
+
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import numpy as np
+
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.geodesic import Geodesic
+from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
+
+from matplotlib.lines import Line2D
+
+# -----------------------------
+# Inputs
+# -----------------------------
+center_lat = 27.9619 # station lat
+center_lon = -82.5403 # station lon
+x_lat = 27.8 # tc lat
+x_lon = -82.1 # tc lon
+radius_km = 500
+track_shp = "milton_2024.shp"
+
+# -----------------------------
+# Load track
+# -----------------------------
+track = gpd.read_file(track_shp)
+if track.crs is None:
+    track = track.set_crs("EPSG:4326")
+else:
+    track = track.to_crs("EPSG:4326")
+
+# -----------------------------
+# Build 500-km geodesic circle
+# -----------------------------
+circle_lonlat = Geodesic().circle(
+    lon=x_lon,
+    lat=x_lat,
+    radius=radius_km * 1000,
+    n_samples=360,
+)
+
+# -----------------------------
+# Plot
+# -----------------------------
+proj = ccrs.PlateCarree()
+fig = plt.figure(figsize=(11, 8))
+ax = plt.axes(projection=proj)
+
+# UPDATED extent (western bound = -90)
+ax.set_extent([-90, -75, 22, 36], crs=proj)
+
+# Boundaries
+ax.add_feature(cfeature.BORDERS, edgecolor="black", linewidth=1.0, zorder=1)
+ax.add_feature(cfeature.STATES, edgecolor="0.6", linewidth=0.8, zorder=1)
+
+# 500 km radius
+ax.plot(
+    circle_lonlat[:, 0],
+    circle_lonlat[:, 1],
+    color="black",
+    linewidth=2,
+    transform=proj,
+    zorder=3,
+)
+
+# Station (red dot)
+ax.scatter(
+    center_lon,
+    center_lat,
+    s=80,
+    color="red",
+    edgecolor="black",
+    linewidth=1.0,
+    transform=proj,
+    zorder=5,
+)
+
+# Hurricane Milton track
+track.plot(
+    ax=ax,
+    color="blue",
+    linewidth=2,
+    transform=proj,
+    zorder=4,
+)
+
+# TC position (black X)
+ax.scatter(
+    x_lon,
+    x_lat,
+    marker="x",
+    s=180,
+    color="black",
+    linewidth=2,
+    transform=proj,
+    zorder=6,
+)
+
+# Lat/lon ticks 
+ax.set_xticks(np.arange(-90, -74.9, 5), crs=proj)
+ax.set_yticks(np.arange(22, 35.1, 4), crs=proj)
+ax.xaxis.set_major_formatter(LongitudeFormatter())
+ax.yaxis.set_major_formatter(LatitudeFormatter())
+ax.tick_params(labelsize=16)
+#ax.set_title("Example of local TC matching", size=20)
+
+# -----------------------------
+# Legend (bottom left)
+# -----------------------------
+legend_elements = [
+    Line2D([0], [0], marker="o", color="w", label="Station",
+           markerfacecolor="red", markeredgecolor="black", markersize=8),
+    Line2D([0], [0], marker="x", color="black", label="TC position",
+           markersize=8, linewidth=0),
+    Line2D([0], [0], color="blue", lw=2, label="TC track"),
+    Line2D([0], [0], color="black", lw=2, label="TC radius"),
+]
+
+ax.legend(
+    handles=legend_elements,
+    loc="lower left",
+    bbox_to_anchor=(-0.02, 0.07),  # (x, y) → increase y to move legend up
+    fontsize=14,
+    frameon=False,
+)
+
+plt.show()
+plt.savefig('milton_case.pdf',dpi=600)
+
+# panel B
+
+# plot Milton on 10/10/2024 (TCWV, track, stations)
+
+import xarray as xr
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+import geopandas as gpd
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
+from matplotlib.colors import BoundaryNorm
+
+# read CSVs
+all_df = pd.read_csv("all_combined_tcs.csv")
+
+# -----------------------------
+# Load TCWV z-score dataset
+# -----------------------------
+ds = xr.open_dataset("tcwv_daily_z.nc")
+
+# -----------------------------
+# Load Z500 dataset + subset
+# -----------------------------
+ds_z500 = xr.open_dataset("z500_tc_2024.nc")
+
+z500_sel = ds_z500["z"].sel(
+    valid_time="2024-10-09",
+    latitude=slice(36, 22),
+    longitude=slice(270, 285)        # match -90 to -75 using 0–360 convention
+).squeeze("pressure_level", drop=True)
+
+# convert lon to -180..180 for plotting on this map, then sort
+z500_sel = z500_sel.assign_coords(
+    longitude=(((z500_sel.longitude + 180) % 360) - 180)
+).sortby("longitude")
+
+# Convert geopotential to geopotential height (meters)
+z500_sel = z500_sel / 9.80665
+
+# -----------------------------
+# Subset data
+# -----------------------------
+tcwv_sel = ds["tcwv"].sel(
+    valid_time="2024-10-09",
+    latitude=slice(22, 36),          # 20–46°N
+    longitude=slice(-90, -75)        # 95–60°W
+)
+
+milton_df = all_df[all_df["SID"] == "2024279N21265"].copy()
+
+# convert precip from inches to mm
+milton_df["precip_mm"] = milton_df["precip"] * 25.4
+
+# make Milton stations GeoDataFrame
+milton_gdf = gpd.GeoDataFrame(
+    milton_df,
+    geometry=gpd.points_from_xy(milton_df["LONGITUDE"], milton_df["LATITUDE"]),
+    crs="EPSG:4326",
+)
+
+# sort ascending to make higher precip values plot on top (last)
+milton_gdf = milton_gdf.sort_values("precip_mm")
+
+# -----------------------------
+# Read Milton 2024 track shapefile
+# -----------------------------
+track = gpd.read_file("milton_2024.shp")
+if track.crs is None:
+    track = track.set_crs("EPSG:4326")
+else:
+    track = track.to_crs("EPSG:4326")
+
+# -----------------------------
+# Plot (Cartopy)
+# -----------------------------
+fig = plt.figure(figsize=(9, 7))
+ax = plt.axes(projection=ccrs.PlateCarree())
+
+# Map extent
+ax.set_extent([-90, -75, 22, 36], crs=ccrs.PlateCarree())
+
+ax.coastlines(resolution="50m", linewidth=0.8)
+ax.add_feature(cfeature.BORDERS, linewidth=0.5)
+ax.add_feature(cfeature.STATES, linewidth=0.5)
+
+# Latitude and longitude tick marks (every 5°)
+ax.set_xticks(np.arange(-90, -74.9, 5), crs=ccrs.PlateCarree())
+ax.set_yticks(np.arange(22, 35.1, 4), crs=ccrs.PlateCarree())
+ax.xaxis.set_major_formatter(LongitudeFormatter())
+ax.yaxis.set_major_formatter(LatitudeFormatter())
+ax.tick_params(labelsize=14)
+
+# Discrete bins every 0.25 from -3 to 3
+bounds = np.arange(-4, 4.0 + 0.25, 0.25)
+norm = BoundaryNorm(bounds, ncolors=plt.get_cmap("PRGn").N, clip=False)
+
+pcm = ax.pcolormesh(
+    tcwv_sel.longitude,
+    tcwv_sel.latitude,
+    tcwv_sel,
+    cmap="PRGn",
+    norm=norm,
+    shading="auto",
+    transform=ccrs.PlateCarree()
+)
+
+cs = ax.contour(
+    z500_sel.longitude,
+    z500_sel.latitude,
+    z500_sel,
+    levels=np.arange(5780, 5901, 20),
+    colors="black",
+    linewidths=1.2,
+    transform=ccrs.PlateCarree(),
+    zorder=6
+)
+
+ax.clabel(cs, fmt="%d", fontsize=12, inline=True)
+
+# -----------------------------
+# Horizontal colorbar (no label)
+# -----------------------------
+cbar = plt.colorbar(
+    pcm,
+    ax=ax,
+    orientation="vertical",
+    #extend="max",
+    pad=0.08,
+    boundaries=bounds,
+    ticks=np.arange(-4, 4.0 + 0.5, 1),
+    aspect=35
+)
+cbar.ax.tick_params(labelsize=18)
+
+# Milton track
+track.plot(
+    ax=ax,
+    transform=ccrs.PlateCarree(),
+    color="blue",
+    linewidth=3,
+    zorder=5
+)
+
+# Station locations 
+milton_gdf.plot(
+    ax=ax,
+    transform=ccrs.PlateCarree(),
+    markersize=80,         
+    color="gold",
+    edgecolor="black",
+    linewidth=0.8,
+    zorder=10               # ensure on top of everything
+)
+
+#ax.set_title("WV std. anomalies on 10 OCT 2024", fontsize=18)
+
+# -----------------------------
+# Legend (bottom left)
+# -----------------------------
+legend_elements = [
+    Line2D(
+    [0], [0],
+    marker="o",
+    linestyle="None",          # <-- disables the line entirely
+    label="Stations",
+    markerfacecolor="gold",
+    markeredgecolor="black",
+    markersize=8
+    ),
+    Line2D(
+        [0], [0],
+        color="blue",
+        lw=3,
+        label="TC track"
+    ),
+    Line2D(
+        [0], [0],
+        color="black",
+        lw=1.5,
+        label="Z500 contours"
+    ),
+]
+
+ax.legend(
+    handles=legend_elements,
+    #loc="upper left",
+    bbox_to_anchor=(0.4, 0.92),
+    fontsize=14,
+    frameon=False,
+)
+
+plt.show()
+
+# panel C
+
+# make Narda plot
+
+# look at AR objects for 2019
+ars = xr.open_dataset('AR_objects_2019.nc')
+ar = ars.where(ars["ar_id"] == 152858, drop=True) # 152858 is the AR object linking Dubuque and Narda
+
+# convert values of 152858 to 1, and nans to 0
+ar["ar_id"] = xr.where(ar["ar_id"] == 152858, 1, 0) # replace in-place to keep ar as a DS
+
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import numpy as np
+
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.geodesic import Geodesic
+from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
+from matplotlib.lines import Line2D
+
+# -----------------------------
+# Inputs (Tropical Storm Narda)
+# -----------------------------
+station_lat = 42.3984
+station_lon = -90.7091
+
+tc_lat = 24.4
+tc_lon = -107.9
+
+radius_km = 500
+track_shp = "narda_2019.shp"
+
+# -----------------------------
+# Load track
+# -----------------------------
+track = gpd.read_file(track_shp)
+if track.crs is None:
+    track = track.set_crs("EPSG:4326")
+else:
+    track = track.to_crs("EPSG:4326")
+
+# -----------------------------
+# 500-km geodesic circle (AROUND TC POSITION)
+# -----------------------------
+circle_lonlat = Geodesic().circle(
+    lon=tc_lon,
+    lat=tc_lat,
+    radius=radius_km * 1000,
+    n_samples=360,
+)
+
+# -----------------------------
+# Plot
+# -----------------------------
+proj = ccrs.PlateCarree()
+fig = plt.figure(figsize=(11, 8))
+ax = plt.axes(projection=proj)
+
+# UPDATED extent: 25–50N, 125–105W
+ax.set_extent([-115, -80, 15, 50], crs=proj)
+
+# boundaries: national + state/province lines
+ax.add_feature(cfeature.BORDERS, edgecolor="black", linewidth=1.0, zorder=100)
+ax.add_feature(cfeature.COASTLINE, edgecolor="black", linewidth=0.8, zorder=98)
+ax.add_feature(cfeature.STATES, edgecolor="0.6", linewidth=0.8, zorder=99)
+
+# -----------------------------
+# AR footprints (time-gradient red CONTOURS, not filled)
+# -----------------------------
+t0 = np.datetime64("2019-09-30T00:00:00")
+t1 = np.datetime64("2019-10-03T00:00:00")
+
+ar_sub = ar["ar_id"].sel(time=slice(t0, t1))
+
+times = ar_sub["time"].values
+n_t = len(times)
+
+reds = plt.cm.YlOrRd(np.linspace(0.9, 0.3, n_t))
+
+for i, t in enumerate(times):
+    ar_mask = (ar_sub.sel(time=t) == 1)
+
+    if int(ar_mask.sum()) == 0:
+        continue
+
+    ax.contourf(
+    ar_sub["lon"].values,
+    ar_sub["lat"].values,
+    ar_mask.astype(int).values,
+    levels=[0.5, 1.5],
+    colors=[reds[i]],
+    alpha=0.45,
+    transform=ccrs.PlateCarree(),
+    zorder=2.2,
+    )
+
+
+# TC radius (black line)
+ax.plot(
+    circle_lonlat[:, 0],
+    circle_lonlat[:, 1],
+    color="black",
+    linewidth=2,
+    transform=proj,
+    zorder=3,
+)
+
+# Station (red dot)
+ax.scatter(
+    station_lon,
+    station_lat,
+    s=80,
+    color="red",
+    edgecolor="black",
+    linewidth=1.0,
+    transform=proj,
+    zorder=100,
+)
+
+# Track (blue)
+track.plot(
+    ax=ax,
+    color="blue",
+    linewidth=2,
+    transform=proj,
+    zorder=4,
+)
+
+# TC position (black X)
+ax.scatter(
+    tc_lon,
+    tc_lat,
+    marker="x",
+    s=180,
+    color="black",
+    linewidth=2,
+    transform=proj,
+    zorder=6,
+)
+
+# ticks every 5 degrees
+ax.set_xticks(np.arange(-115, -79.9, 5), crs=proj)
+ax.set_yticks(np.arange(15, 50.1, 5), crs=proj)
+ax.xaxis.set_major_formatter(LongitudeFormatter())
+ax.yaxis.set_major_formatter(LatitudeFormatter())
+ax.tick_params(labelsize=16)
+#ax.set_title("Example of remote TC matching", size=20)
+
+# # legend
+# legend_elements = [
+#     Line2D([0], [0], marker="o", color="w", label="Station",
+#            markerfacecolor="red", markeredgecolor="black", markersize=8),
+#     Line2D([0], [0], marker="x", color="black", label="TC position",
+#            markersize=8, linewidth=0),
+#     Line2D([0], [0], color="blue", lw=2, label="TC track"),
+#     Line2D([0], [0], color="black", lw=2, label="TC radius"),
+# ]
+
+# ax.legend(
+#     handles=legend_elements,
+#     loc="lower left",
+#     bbox_to_anchor=(0.02, 0.01),
+#     fontsize=11,
+#     frameon=False,
+# )
+
+# run this separately to generate other legend, and manually paste the first legend into this version
+
+ar_leg = ax.legend(
+    handles=ar_legend_handles,
+    title="AR footprints (time)",
+    loc="lower right",
+    fontsize=10,
+    title_fontsize=11,
+    frameon=True,
+    fancybox=False,        # optional: simpler patch
+)
+
+# Force an opaque, on-top legend box
+frame = ar_leg.get_frame()
+frame.set_facecolor("white")
+frame.set_edgecolor("0.5")
+frame.set_linewidth(1.0)
+frame.set_alpha(1.0)
+
+# Make sure legend draws above the map layers
+ar_leg.set_zorder(10_000)
+frame.set_zorder(9_999)
+
+plt.savefig('narda_case.pdf',dpi=600)
+
+# panel D
+
+# plot Narda on 10/01/19 (TCWV, track, stations)
+
+import xarray as xr
+import numpy as np
+import matplotlib.pyplot as plt
+
+import geopandas as gpd
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
+from matplotlib.colors import BoundaryNorm
+
+# -----------------------------
+# Load TCWV z-score dataset
+# -----------------------------
+ds = xr.open_dataset("tcwv_daily_z.nc")
+
+# -----------------------------
+# Load Z500 dataset + subset
+# -----------------------------
+ds_z500 = xr.open_dataset("z500_tc_2019.nc")
+
+z500_sel = ds_z500["z"].sel(
+    valid_time="2019-10-01",
+    latitude=slice(50, 20),
+    longitude=slice(245, 280)        # match -115 to -80 using 0–360 convention
+).squeeze("pressure_level", drop=True)
+
+# convert lon to -180..180 for plotting on this map, then sort
+z500_sel = z500_sel.assign_coords(
+    longitude=(((z500_sel.longitude + 180) % 360) - 180)
+).sortby("longitude")
+
+# Convert geopotential to geopotential height (meters)
+z500_sel = z500_sel / 9.80665
+
+# -----------------------------
+# Subset data
+# -----------------------------
+tcwv_sel = ds["tcwv"].sel(
+    valid_time="2019-10-01",
+    latitude=slice(20, 50),          # 20–46°N
+    longitude=slice(-115, -80)        # 95–60°W
+)
+
+narda_df = all_df[all_df["SID"] == "2019272N14261"].copy()
+
+# convert precip from inches to mm
+narda_df["precip_mm"] = narda_df["precip"] * 25.4
+
+# make Narda stations GeoDataFrame
+narda_gdf = gpd.GeoDataFrame(
+    narda_df,
+    geometry=gpd.points_from_xy(narda_df["LONGITUDE"], narda_df["LATITUDE"]),
+    crs="EPSG:4326",
+)
+
+# sort ascending to make higher precip values plot on top (last)
+narda_gdf = narda_gdf.sort_values("precip_mm")
+
+# -----------------------------
+# Read Narda 2019 track shapefile
+# -----------------------------
+track = gpd.read_file("narda_2019.shp")
+if track.crs is None:
+    track = track.set_crs("EPSG:4326")
+else:
+    track = track.to_crs("EPSG:4326")
+
+# -----------------------------
+# Plot (Cartopy)
+# -----------------------------
+fig = plt.figure(figsize=(9, 7))
+ax = plt.axes(projection=ccrs.PlateCarree())
+
+# Map extent
+ax.set_extent([-115, -80, 20, 50], crs=ccrs.PlateCarree())
+
+ax.coastlines(resolution="50m", linewidth=0.8)
+ax.add_feature(cfeature.BORDERS, linewidth=0.5)
+ax.add_feature(cfeature.STATES, linewidth=0.5)
+
+# Latitude and longitude tick marks (every 5°)
+ax.set_xticks(np.arange(-115, -79.9, 5), crs=ccrs.PlateCarree())
+ax.set_yticks(np.arange(20, 50.1, 5), crs=ccrs.PlateCarree())
+ax.xaxis.set_major_formatter(LongitudeFormatter())
+ax.yaxis.set_major_formatter(LatitudeFormatter())
+ax.tick_params(labelsize=14)
+
+# Discrete bins every 0.25 from -3 to 3
+bounds = np.arange(-4, 4.0 + 0.25, 0.25)
+norm = BoundaryNorm(bounds, ncolors=plt.get_cmap("PRGn").N, clip=False)
+
+pcm = ax.pcolormesh(
+    tcwv_sel.longitude,
+    tcwv_sel.latitude,
+    tcwv_sel,
+    cmap="PRGn",
+    norm=norm,
+    shading="auto",
+    transform=ccrs.PlateCarree()
+)
+
+cs = ax.contour(
+    z500_sel.longitude,
+    z500_sel.latitude,
+    z500_sel,
+    levels=np.arange(5500, 5960, 40),
+    colors="black",
+    linewidths=1.2,
+    transform=ccrs.PlateCarree(),
+    zorder=6
+)
+
+ax.clabel(cs, fmt="%d", fontsize=12, inline=True)
+
+# -----------------------------
+# Horizontal colorbar (no label)
+# -----------------------------
+# cbar = plt.colorbar(
+#     pcm,
+#     ax=ax,
+#     orientation="vertical",
+#     extend="max",
+#     pad=0.08,
+#     boundaries=bounds,
+#     ticks=np.arange(-3, 3.0 + 0.5, 0.5),
+#     aspect=35
+# )
+# cbar.ax.tick_params(labelsize=18)
+
+# Tropical Storm Narda track
+track.plot(
+    ax=ax,
+    transform=ccrs.PlateCarree(),
+    color="blue",
+    linewidth=3,
+    zorder=5
+)
+
+# Station locations 
+narda_gdf.plot(
+    ax=ax,
+    transform=ccrs.PlateCarree(),
+    markersize=80,         
+    color="gold",
+    edgecolor="black",
+    linewidth=0.8,
+    zorder=10               # ensure on top of everything
+)
+
