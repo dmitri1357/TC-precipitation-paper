@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+
+import pandas as pd
+import geopandas as gpd
+
+df = pd.read_csv("ibtracs.ALL.list.v04r01.csv", usecols=["SID","BASIN","SUBBASIN","NAME","ISO_TIME","NATURE","LAT","LON"])
+df = df.iloc[1:]  # drop first row
+
+gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df["LON"], df["LAT"]), crs="EPSG:4326")
+gdf_merc = gdf.to_crs("EPSG:3857")  # meters
+gdf["buffer_1000km"] = gdf_merc.buffer(1000000).to_crs("EPSG:4326")  # 1000 km
+gdf['year'] = pd.to_datetime(gdf['ISO_TIME']).dt.year
+
+gdf.NATURE.unique()
+#gdf = gdf[gdf.NATURE != 'DS'] # remove disturbances
+gdf = gdf[gdf.NATURE != 'NR'] # remove "not reported"
+gdf.loc[gdf["NATURE"] == "MX", "NATURE"] = "ET" # renamed in place - treating Mixed reports as ET
+# you’re saying: “for rows where NATURE == 'MX', set the NATURE column to 'ET'.”
+# If you omitted the second "NATURE", you’d be targeting whole rows, not just that column.
+gdf.loc[gdf["NATURE"] == "SS", "NATURE"] = "TS" # renamed in place - treating subtropical as tropical
+gdf.loc[gdf["NATURE"] == "DS", "NATURE"] = "TS" # renamed in place - treating disturbances as tropical
+
+gdf["LON"] = pd.to_numeric(gdf["LON"], errors="coerce")
+gdf["LAT"] = pd.to_numeric(gdf["LAT"], errors="coerce")
+
+# Wrap the few entires on 0,360 scale to [-180,180]
+# this leaves the entries the are already on the [-180,180] scale as-is
+gdf["LON"] = ((gdf["LON"] + 180) % 360) - 180
+
+# linking n-largest events with TCs (remote)
+
+import os
+import glob
+import pandas as pd
+import numpy as np
+import xarray as xr
+from tqdm import tqdm
+from geopy.distance import geodesic
+
+# List all the CSV files
+# replace with your path to the cleaned_hourly folder
+csv_files = glob.glob("/data/lab/singh/dmitri/tc_precip/remote_tcs/cleaned_hourly/*.csv")
+
+# load shapefile of ocean basins
+basins = gpd.read_file("ocean_basins.shp")
+
+percs = []
+dists = []
+num_tc = []
+peak_seasons = np.empty(len(csv_files)) # need this to maintain length of 420
+peak_seasons[:] = np.nan
+peak_basins = np.empty(len(csv_files)) # need this to maintain length of 420
+peak_basins[:] = np.nan
+perc_tropical = np.empty(len(csv_files))
+perc_tropical[:] = np.nan # need nans if no TC were associated at that station, because real zero percs could exist
+for i, file_path in enumerate(csv_files):
+    df = pd.read_csv(file_path)
+    df = df.dropna(subset=["precip"])  # Remove NaNs
+    
+    # need to rename NAME column so it won't clash with the TC NAME column
+    df = df.rename(columns={"NAME": "STATION_NAME"})
+
+    # Convert DATE to datetime and extract year
+    df["DATE"] = pd.to_datetime(df["DATE"])
+    df["year"] = df["DATE"].dt.year
+
+    # Determine the number of years of data available
+    years_available = df["year"].nunique()
+
+    # Sort by precip descending
+    df_sorted = df.sort_values(by="precip", ascending=False)
+
+    # Initialize list to store top events
+    top_events = []
+
+    for idx, row in df_sorted.iterrows():
+        event_time = row["DATE"]
+        # Check if this event is at least 12 hours apart from existing events
+        if all(abs((event_time - existing_time).total_seconds()) >= 12 * 3600 for existing_time in [e["DATE"] for e in top_events]):
+            top_events.append(row)
+        if len(top_events) >= years_available * 2: # n = 2
+            break
+
+    # Create DataFrame from top events
+    top_df = pd.DataFrame(top_events).sort_values(by="DATE")
+    
+    # Sort by precip descending again, this time to grab only the top 90
+    # this is needed because some COOPs are grabbing top 92 since it looks like there are 46 yrs
+    # available after I set time to UTC and Dec 31st evening values in 2024 were assigned to 1/1/2025
+    top_df = top_df.sort_values(by="precip", ascending=False)
+    
+    if len(top_df) > 90:
+        top_df = top_df.iloc[:90,:]
+    
+    # Ensure datetimes
+    top_df["DATE"] = pd.to_datetime(top_df["DATE"])
+    gdf["ISO_TIME"] = pd.to_datetime(gdf["ISO_TIME"])
+    
+    # Points for precip events
+    top_gdf = gpd.GeoDataFrame(
+        top_df, geometry=gpd.points_from_xy(top_df["LONGITUDE"], top_df["LATITUDE"]), crs="EPSG:4326"
+    )
+    
+    # first, set a generous buffer to only search through subset of storm candidates (instead of all global storms)
+    # setting this to 1000 km
+    
+    # Use the 1000-km buffers for TCs as the active geometry
+    gdf_buf = gdf.set_geometry("buffer_1000km")
+    
+    # Spatially match events that fall inside a TC's 1000-km buffer
+    candidates = gpd.sjoin(
+        top_gdf[["DATE", "geometry"]].assign(event_id=top_gdf.index),
+        gdf_buf[["SID", "BASIN", "SUBBASIN", "NAME", "NATURE", "year", "ISO_TIME", "buffer_1000km", "LAT", "LON"]],
+        how="inner",
+        predicate="within",
+    )
+    
+    # Keep only TC observations within ±12 hours and pick the most time-proximate per event
+    candidates["abs_dt"] = (candidates["ISO_TIME"] - candidates["DATE"]).abs()
+    candidates = candidates[candidates["abs_dt"] <= pd.Timedelta(hours=12)] # 24 hour window
+    best = candidates.sort_values("abs_dt").drop_duplicates("event_id", keep="first")
+    
+    # Write results back to top_df
+    top_df["tc_presence"] = 0
+    top_df.loc[best["event_id"], "tc_presence"] = 1
+    top_df.loc[best["event_id"], ["SID", "BASIN", "SUBBASIN", "NAME", "NATURE", "year", "TC_LAT", "TC_LON"]] = best[["SID", "BASIN", "SUBBASIN", "NAME", "NATURE", "year", "LAT", "LON"]].values
+    
+    #year = 2023
+    #row = top_df[top_df["year"] == year].iloc[0,:]
+    
+    # ensure plain int years (drop NA if any)
+    top_df["year"] = pd.to_datetime(top_df["DATE"]).dt.year
+    top_df = top_df[top_df["year"].notna()].copy()
+    top_df["year"] = top_df["year"].astype(int)
+        
+    rows_out = []
+    
+    # grouping is preferred with Pandas
+    for year, sub in top_df.groupby("year", sort=True):
+    #for year in sorted(top_df["year"].unique()):
+        ds_ar = xr.open_dataset(f"AR_objects_{int(year)}.nc")[["ar_id"]]
+        
+        for _, row in sub.iterrows(): # sub is subset (year)
+        #for _, row in top_df[top_df["year"] == year].iterrows():
+            event_time = row["DATE"]
+            event_id = row.name # this extracts the event ID from top_df for later matching with TC
+            stlat = float(row["LATITUDE"])
+            stlon = float(row["LONGITUDE"])
+    
+            ar_times = ds_ar["time"].values
+            # get time index of closest AR timestamp to precip obs
+            t_idx = int(np.argmin(np.abs(ar_times - np.datetime64(event_time))))
+            ar_slice = ds_ar["ar_id"].isel(time=t_idx)
+            
+            # station inside AR at nearest 6-hour time?
+            val = ar_slice.sel(lat=stlat, lon=stlon, method="nearest").item() # extract AR ID if there's an AR
+            ar_id = int(val) if val > 0 else 0
+            
+            # no longer using 100km buffer
+            # I think removing this step reduced the loop time from 6 minutes to 2 minutes for each station
+            # # if not inside, allow a 100-km buffer to nearest AR gridcell (>0)
+            # if ar_id == 0:
+            #     mask = ar_slice.values > 0
+            #     if mask.any():
+            #         lats = ds_ar["lat"].values
+            #         lons = ds_ar["lon"].values
+            #         Lon2, Lat2 = np.meshgrid(lons, lats)
+            #         lat_pts = Lat2[mask].ravel()
+            #         lon_pts = Lon2[mask].ravel()
+            #         dists2 = [geodesic((stlat, stlon), (float(la), float(lo))).meters
+            #                  for la, lo in zip(lat_pts, lon_pts)]
+            #         j = int(np.argmin(dists2))
+            #         if dists2[j] <= 100_000: # 100,000 m = 100 km
+            #             iy, ix = np.argwhere(mask)[j]
+            #             ar_id = int(ar_slice.values[iy, ix])
+                        
+            if ar_id == 0: # if no AR on that day, skip the rest of the loop and move on to the next precip event
+                continue
+            
+            # the rest of the code continues if there was an AR object on that day over/near the precip event
+    
+            # check for presence of this AR object in any timesteps 
+            occ = (ds_ar["ar_id"] == ar_id).any(dim=("lat", "lon")).values
+            idxs = np.where(occ)[0]
+    
+            # start from closest AR time to the event, then iterate backward in time (max 5 days)
+            closest = idxs[np.argmin(np.abs(ds_ar["time"].values[idxs] - np.datetime64(event_time)))]
+            start_pos = int(np.where(idxs == closest)[0][0])
+            
+            for pos in range(start_pos, -1, -1):
+                ti = int(idxs[pos])
+                t_ar = pd.to_datetime(ds_ar["time"].values[ti])
+            
+                # stop if we're beyond 120 hours (5 days) before the event
+                if (event_time - t_ar) > pd.Timedelta(hours=120):
+                    break
+            
+                # TC candidates within ±3 hours of this AR time
+                tmin, tmax = t_ar - pd.Timedelta(hours=3), t_ar + pd.Timedelta(hours=3)
+                tcw = gdf[(gdf["ISO_TIME"] >= tmin) & (gdf["ISO_TIME"] <= tmax)]
+                if tcw.empty: # if no TC at the closest timestep to precip obs anywhere in the world, skip rest of loop and continue to next "pos" (next earlier timestep to search for TC)
+                    continue
+            
+                # require TC to lie within this AR's footprint at this time
+                ar_frame = ds_ar["ar_id"].isel(time=ti)
+                # this assigns all global TCs at that timestep to any corresponding ARs, whether or not they are related to the precip event
+                vals = [ar_frame.sel(lat=float(r2.LAT), lon=float(r2.LON), method="nearest").item()
+                        for _, r2 in tcw.iterrows()]
+                tcw = tcw.assign(_arval=vals)
+                # this step checks if any of the TC-AR pairings are actually for the AR in question
+                tcw = tcw[tcw["_arval"] == ar_id]
+                if tcw.empty: # if no TC in the AR footprint, skip rest of loop and continue to next "pos" (next earlier timestep to search for TC)
+                    continue
+            
+                # distance to station
+                dists3 = [geodesic((stlat, stlon), (float(r2.LAT), float(r2.LON))).meters
+                         for _, r2 in tcw.iterrows()]
+                tcw = tcw.assign(_dist_m=dists3)
+            
+                # time lag (hours) of TC prior to event, keep only 0–120 h
+                # this secondary check is needed since I have a 6-hr window for ARs, so this enforces 5 days again
+                # this also removes any future timesteps (where time lag is negative)
+                tcw["_lag_h"] = (event_time - tcw["ISO_TIME"]).dt.total_seconds() / 3600.0
+                tcw = tcw[(tcw["_lag_h"] >= 0) & (tcw["_lag_h"] <= 120)]
+                if tcw.empty:
+                    continue
+            
+                # apply distance thresholds by lag bin (<=24h:1000 km, 24–48:2000, ..., 96–120:5000)
+                allowed_km = pd.cut(
+                    tcw["_lag_h"],
+                    bins=[0, 24, 48, 72, 96, 120],
+                    labels=[1500, 3000, 4500, 6000, 7500],
+                    include_lowest=True,
+                    right=True
+                ).astype(float)
+                # this removes TCs that are outside the disance/day criteria
+                # in the case of Harold, the two remaining points are >2000km within 24 hours, so they are dropped
+                tcw = tcw[tcw["_dist_m"] <= (allowed_km.values * 1000.0)] # x1000 because dists are in meters
+                if tcw.empty:
+                    continue
+            
+                # pick closest-in-space among those that pass
+                tcw = tcw.sort_values("_dist_m")
+                # in case of multiple TCs or multiple timesteps (with the 6 hr buffer), this will select the closest one in space
+                best = tcw.iloc[0]
+
+                rows_out.append({
+                    "event_id": event_id,
+                    "DATE": event_time,
+                    "year": int(year),
+                    "station_lat": stlat,
+                    "station_lon": stlon,
+                    "AR_time": t_ar,
+                    "AR_id": ar_id,
+                    "TC_ISO_TIME": best["ISO_TIME"],
+                    "TC_LAT": float(best["LAT"]),
+                    "TC_LON": float(best["LON"]),
+                    "TC_distance_km": float(best["_dist_m"]) / 1000.0,
+                    "SID": best["SID"],
+                    "BASIN": best["BASIN"],
+                    "SUBBASIN": best["SUBBASIN"],
+                    "NAME": best["NAME"],
+                    "NATURE": best["NATURE"]
+                })
+
+                break # stop searching earlier timesteps for this event
+    
+        ds_ar.close()
+    
+    # build candidates DataFrame (empty if no matches)
+    candidates = pd.DataFrame(rows_out, columns=[
+        "event_id","DATE","year","station_lat","station_lon","AR_time","AR_id",
+        "TC_ISO_TIME","TC_LAT","TC_LON","TC_distance_km","SID","BASIN","SUBBASIN",
+        "NAME","NATURE"
+    ])
+    
+    # Write results back to top_df
+    top_df["tc_presence_remote"] = 0
+    top_df.loc[candidates["event_id"], "tc_presence_remote"] = 1
+    top_df.loc[candidates["event_id"], ["SID", "BASIN", "SUBBASIN", "NAME", "NATURE", "year", "TC_LAT", "TC_LON"]] = candidates[["SID", "BASIN", "SUBBASIN", "NAME", "NATURE", "year", "TC_LAT", "TC_LON"]].values
+    
+    # calculate distances between TC points and precip obs
+    mask = top_df["TC_LAT"].notna() & top_df["TC_LON"].notna()
+    pairs = zip(top_df.loc[mask, "LATITUDE"],
+                top_df.loc[mask, "LONGITUDE"],
+                top_df.loc[mask, "TC_LAT"],
+                top_df.loc[mask, "TC_LON"])
+    
+    top_df.loc[mask, "distance_km"] = [
+        geodesic((lat1, lon1), (lat2, lon2)).km
+        for lat1, lon1, lat2, lon2 in pairs
+    ]
+    
+    # extract season info
+    season_map = {12:1, 1:1, 2:1,
+                  3:2, 4:2, 5:2,
+                  6:3, 7:3, 8:3,
+                  9:4, 10:4, 11:4}
+    top_df["season"] = top_df["DATE"].dt.month.map(season_map)
+    
+    # here, I am specifying the actual buffer I want for the study (500 km)
+    # but only if tc_presence == 1 (local TC)
+    # and also keeping any rows with remote TCs regardless of distance
+    top_df2 = top_df[((top_df["distance_km"] < 500) & (top_df["tc_presence"] == 1)) | (top_df["tc_presence_remote"] == 1)]
+    
+    # if it's <500km and already matched locally, then the remote match needs to be removed
+    # if it's >500km and matched remotely, then the local match needs to be removed (the local match came from the initial, larger radius and not the true 500 km radius)
+    
+    # Case 1: distance_km < 500 and both flags == 1
+    top_df2.loc[
+        (top_df2["distance_km"] < 500) &
+        (top_df2["tc_presence"] == 1) &
+        (top_df2["tc_presence_remote"] == 1),
+        "tc_presence_remote"
+    ] = 0
+    
+    # Case 2: distance_km > 500 and both flags == 1
+    top_df2.loc[
+        (top_df2["distance_km"] > 500) &
+        (top_df2["tc_presence"] == 1) &
+        (top_df2["tc_presence_remote"] == 1),
+        "tc_presence"
+    ] = 0
+
+    # find most common season
+    season_mode = top_df2["season"].mode().tolist()
+    if len(season_mode) == 1: # if 0, is set to nan automatically 
+        peak_seasons[i] = season_mode[0] # only store mode if there is a clear #1, no ties allowed
+    elif len(season_mode) > 1: # set ties to gray (will call them season = 5)
+        peak_seasons[i] = 5
+        
+    # associate TCs with ocean basins
+    # first, need to find the origin lat and lon of the storms
+    top_df2["formation_lat"] = pd.NA
+    top_df2["formation_lon"] = pd.NA
+    
+    for row_index, row in top_df2.iterrows():
+        storm_rows = gdf[gdf["SID"] == row["SID"]] # match storm ID's
+        earliest_row = storm_rows.loc[storm_rows["ISO_TIME"].idxmin()]
+        top_df2.at[row_index, "formation_lat"] = earliest_row["LAT"]
+        top_df2.at[row_index, "formation_lon"] = earliest_row["LON"]
+    
+    # now, associate the origin lat and lon with the ocean basins
+    tc_points = gpd.GeoDataFrame(top_df2, geometry=gpd.points_from_xy(top_df2["formation_lon"], top_df2["formation_lat"]), crs=basins.crs)
+    # First try "within", then fill misses with nearest basin
+    joined = gpd.sjoin(tc_points, basins, how="left", predicate="within") # this is the main join line
+    # handle cases where the TC development point may have been over land but very close to an ocean basin
+    missing = joined["name"].isna()
+    if missing.any():
+        nearest = gpd.sjoin_nearest(tc_points[missing], basins, how="left")
+        joined.loc[missing, "name"] = nearest.loc[joined.index[missing], "name"].values
+    # this line is unchanged, just assigning the basin name back to top_df2
+    top_df2["ocean_basin"] = joined["name"].values
+    
+    # map basins to numeric codes
+    basin_map = {'NATL':1, 'EPAC':2, 'WPAC':3}
+    top_df2["ocean_basin"] = top_df2["ocean_basin"].map(basin_map)
+    
+    if len(top_df2) > 0: # if zero, already set to NA by default
+        frac_tropical = len(top_df2[top_df2.NATURE == "TS"]) / len(top_df2)
+        perc_tropical[i] = frac_tropical * 100
+    
+    # find most common basin
+    basin_mode = top_df2["ocean_basin"].mode().tolist()
+    if len(basin_mode) == 1: # if 0, is set to nan automatically 
+        peak_basins[i] = basin_mode[0] # only store mode if there is a clear #1, no ties allowed
+    elif len(basin_mode) > 1: # set ties to gray (will call them basin = 5)
+        peak_basins[i] = 5
+    
+    fraction = len(top_df2) / len(top_df)
+    percs.append(fraction * 100)
+    
+    dist = np.median(top_df2.distance_km)
+    dists.append(dist)
+    
+    num_tc.append(len(top_df2))
+    
+stations = [os.path.basename(file).removesuffix(".csv") for file in csv_files]
+
+# save output to csv
+output_df = pd.DataFrame({
+    'station':stations,
+    'tc_percs':percs,
+    'tc_dists':dists,
+    'num_tc':num_tc,
+    'peak_seasons':peak_seasons,
+    'peak_basins':peak_basins,
+    'perc_tropical':perc_tropical
+    })
+
+output_df.to_csv('tc_stats_combined_1hr.csv', index=False)
