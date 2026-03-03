@@ -42,7 +42,8 @@ from tqdm import tqdm
 from geopy.distance import geodesic
 
 # List all the CSV files
-# change to your local path to the "cleaned_hourly" folder
+# this is my local path to the "cleaned_hourly" folder, which contains the 420 QC'd station files
+# the QC'd data is not shared publicly, but the original station data is publicly available
 csv_files = glob.glob("/Users/dkalashnikov/Desktop/tc_precip/cleaned_hourly/*.csv")
 
 # load shapefile of ocean basins
