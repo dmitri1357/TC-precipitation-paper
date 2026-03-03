@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+
+'''
+Note - this code shows how to create the the local TC panels of Figure 2 (panel a) and Figure 3 (panels a,d,g). The remote TC panels were created using the same 
+code but with different variable names. 
+'''
+
+# figure 2a
+
+tc_stats = pd.read_csv('tc_stats_local_1hr.csv')
+
+stations = gpd.read_file("combined_hourly_421.shp")
+
+# Load climate regions
+climate_regions = gpd.read_file("climate_regions.shp")
+
+# map the variable
+
+variable = tc_stats.tc_percs
+
+# Add to DataFrame
+stations["results"] = variable
+stations["num_tc"] = tc_stats.num_tc
+
+# Load states
+states = gpd.read_file("cb_2018_us_state_5m.shp")
+states = states.to_crs("EPSG:4326")
+states = states[states.NAME.isin(["Alabama", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", 
+                                  "Florida", "Georgia", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", 
+                                  "Louisiana", "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota", 
+                                  "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", 
+                                  "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio", 
+                                  "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota", 
+                                  "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington", "West Virginia", 
+                                  "Wisconsin", "Wyoming"])]
+
+import matplotlib.colors as mcolors
+from matplotlib.colors import ListedColormap
+
+# # make values 0-1 white
+# bounds = np.arange(0, 16.1, 1)
+# n_bins = len(bounds) - 1
+# colors = ["w"] + [plt.cm.YlOrRd(v) for v in np.linspace(0, 1, n_bins - 1)]
+# cmap = ListedColormap(colors)
+# norm = mcolors.BoundaryNorm(boundaries=bounds, ncolors=cmap.N, clip=True)
+
+# Define bins and colormap
+bounds = np.arange(0, 16.1, 1)
+cmap = plt.cm.YlOrRd
+norm = mcolors.BoundaryNorm(boundaries=bounds, ncolors=cmap.N, clip=True)
+
+# Plotting
+fig, ax = plt.subplots(figsize=(10, 8))
+states.boundary.plot(ax=ax, edgecolor="0.8", zorder=0)
+climate_regions.boundary.plot(ax=ax, edgecolor="k", lw=1, zorder=1)
+# make stations with zero invisible (alpha = 0)
+stations[stations["results"] == 0].plot(ax=ax, color="0.5", markersize=10)
+stations[stations["num_tc"] == 1].plot(ax=ax, color="w", markersize=50, edgecolor="black", zorder=100)
+stations[stations["results"] != 0].plot(ax=ax, column="results", cmap=cmap, norm=norm,
+                                        markersize=50, edgecolor="black", vmin = 0, vmax = 16)
+
+# ---- add labels for each region ----
+for idx, row in climate_regions.iterrows():
+
+    region_id = row["region_nam"]
+
+    # default position = centroid
+    x = row.geometry.centroid.x
+    y = row.geometry.centroid.y
+
+    # ---- custom manual overrides ----
+    if region_id == 'NW':
+        x = -118    # example longitude shift
+        y = 44.5    # example latitude shift
+
+    if region_id == 'W':
+        x = -119
+        y = 38.0
+
+    if region_id == 'NR&P':
+        x = -104
+        y = 44.8
+        
+    if region_id == 'SW':
+        x = -108
+        y = 37
+
+    if region_id == 'S':
+        x = -96
+        y = 33
+
+    if region_id == 'UM':
+        x = -91.5
+        y = 44.5
+    
+    if region_id == 'OV':
+        x = -86.6   
+        y = 37
+
+    if region_id == 'SE':
+        x = -82.6
+        y = 32.0
+
+    if region_id == 'NE':
+        x = -74.9
+        y = 42.3
+
+    # draw label
+    ax.text(
+        x,
+        y,
+        str(region_id),
+        ha="center",
+        va="center",
+        fontsize=18,
+        fontweight="bold",
+        zorder=2,
+    )
+
+# Add colorbar
+sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+cbar = plt.colorbar(sm, ax=ax, orientation="horizontal", aspect=35, fraction=0.025, pad=0.002, shrink=0.6,
+                    ticks=np.arange(0, 16.1, 2))
+cbar.ax.tick_params(labelsize=12)
+# Annotate each point with its station name
+# for x, y, label in zip(gdf.geometry.x, gdf.geometry.y, gdf['station']):
+#     ax.annotate(label, xy=(x, y), xytext=(3, 3), textcoords="offset points", fontsize=8)
+    
+
+#plt.title("% of n2 events associated with local TCs", fontsize=20, y=0.96)
+ax.set_axis_off()
+plt.show()
+
+# find number of stations with TC influence
+
+variable = tc_stats.num_tc
+len(np.where(variable > 0)[0]) # 156 stations
+num_tc_stations = 156
+
+# figure 3a
+
+variable = tc_stats.peak_seasons
+
+# Add to DataFrame
+stations["results_original"] = variable # need to keep the original numeric values for nan plotting
+
+# mab season results back to actual seasons
+season_map = {1:'DJF',2:'MAM',3:'JJA',4:'SON'}
+stations["results"] = stations["results_original"].map(season_map)
+
+# Load states
+states = gpd.read_file("cb_2018_us_state_5m.shp")
+states = states.to_crs("EPSG:4326")
+states = states[states.NAME.isin(["Alabama", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", 
+                                  "Florida", "Georgia", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", 
+                                  "Louisiana", "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota", 
+                                  "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", 
+                                  "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio", 
+                                  "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota", 
+                                  "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington", "West Virginia", 
+                                  "Wisconsin", "Wyoming"])]
+
+gdf = stations # doing this to keep the rest of the pasted code consistent
+
+# percentages for legend
+num_djf = (len(gdf[gdf["results"] == "DJF"])/num_tc_stations) * 100
+num_mam = (len(gdf[gdf["results"] == "MAM"])/num_tc_stations) * 100
+num_jja = (len(gdf[gdf["results"] == "JJA"])/num_tc_stations) * 100
+num_son = (len(gdf[gdf["results"] == "SON"])/num_tc_stations) * 100
+season_numbers = [num_djf,num_mam,num_jja,num_son]
+
+# plotting
+
+from matplotlib.lines import Line2D
+
+fig, ax = plt.subplots(figsize=(10, 8))
+states.boundary.plot(ax=ax, edgecolor="0.8", zorder=0)
+climate_regions.boundary.plot(ax=ax, edgecolor="k", lw=3, zorder=1)
+
+season_colors = {"DJF": "blue", "MAM": "c", "JJA": "red", "SON": "orange"}
+
+# plot nans using original numeric season column
+# added alpha=0 to make stations without TC linkage (peak season = nan) invisible
+stations[np.isnan(stations["results_original"])].plot(ax=ax, color="0.5", markersize=10)
+# make stations with ties gray
+stations[stations["results_original"] == 5].plot(ax=ax, color="w", markersize=50, edgecolor="black", zorder=100)
+
+# Plot season-specific points
+for i, (season, color) in enumerate(season_colors.items()):
+    subset = gdf[gdf["results"] == season]
+    if not subset.empty:
+        subset.plot(ax=ax, color=color, markersize=50, edgecolor="black", label=f'{season} ({season_numbers[i]:.1f}%)')
+# # Annotate each point with its station name
+# for x, y, label in zip(gdf.geometry.x, gdf.geometry.y, gdf['NAME']):
+#     ax.annotate(label, xy=(x, y), xytext=(3, 3), textcoords="offset points", fontsize=8)
+
+# ---- add labels for each region ----
+for idx, row in climate_regions.iterrows():
+
+    region_id = row["region_nam"]
+
+    # default position = centroid
+    x = row.geometry.centroid.x
+    y = row.geometry.centroid.y
+
+    # ---- custom manual overrides ----
+    if region_id == 'NW':
+        x = -118    # example longitude shift
+        y = 44.5    # example latitude shift
+
+    if region_id == 'W':
+        x = -119
+        y = 38.0
+
+    if region_id == 'NR&P':
+        x = -104
+        y = 44.8
+        
+    if region_id == 'SW':
+        x = -108
+        y = 37
+
+    if region_id == 'S':
+        x = -96
+        y = 33
+
+    if region_id == 'UM':
+        x = -91.5
+        y = 44.5
+    
+    if region_id == 'OV':
+        x = -86.6   
+        y = 37
+
+    if region_id == 'SE':
+        x = -82.6
+        y = 32.0
+
+    if region_id == 'NE':
+        x = -74.9
+        y = 42.3
+
+    # draw label
+    ax.text(
+        x,
+        y,
+        str(region_id),
+        ha="center",
+        va="center",
+        fontsize=18,
+        fontweight="bold",
+        zorder=2,
+    )
+
+# custom legend (always include DJF first, even if absent)
+season_percent = {"DJF": num_djf, "MAM": num_mam, "JJA": num_jja, "SON": num_son}
+order = ["DJF", "MAM", "JJA", "SON"]
+
+handles = [
+    Line2D([0], [0], marker="o", linestyle="None",
+           markerfacecolor=season_colors[s], markeredgecolor="black", color="none", markersize=8)
+    for s in order
+]
+labels = [f"{s} ({season_percent[s]:.1f}%)" for s in order]
+
+plt.legend(handles, labels, loc="lower left", bbox_to_anchor=(-0.05, 0.08), fontsize=10)
+    
+#ax.set_title("Most common season of TC-n2", fontsize=20, y=0.96)
+ax.set_axis_off()
+
+# figure 3d
+
+variable = tc_stats.peak_basins
+
+# Add to DataFrame
+stations["results_original"] = variable # need to keep the original numeric values for nan plotting
+
+# map season results back to actual seasons
+basin_map = {1:'NATL',2:'EPAC',3:'WPAC'}
+stations["results"] = stations["results_original"].map(basin_map)
+
+# Load states
+states = gpd.read_file("cb_2018_us_state_5m.shp")
+states = states.to_crs("EPSG:4326")
+states = states[states.NAME.isin(["Alabama", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", 
+                                  "Florida", "Georgia", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", 
+                                  "Louisiana", "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota", 
+                                  "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", 
+                                  "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio", 
+                                  "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota", 
+                                  "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington", "West Virginia", 
+                                  "Wisconsin", "Wyoming"])]
+
+gdf = stations # doing this to keep the rest of the pasted code consistent
+
+# percentages for legend
+num_natl = (len(gdf[gdf["results"] == "NATL"])/num_tc_stations) * 100
+num_epac = (len(gdf[gdf["results"] == "EPAC"])/num_tc_stations) * 100
+num_wpac = (len(gdf[gdf["results"] == "WPAC"])/num_tc_stations) * 100
+basin_numbers = [num_natl,num_epac,num_wpac]
+
+# plotting
+
+from matplotlib.lines import Line2D
+
+fig, ax = plt.subplots(figsize=(10, 8))
+states.boundary.plot(ax=ax, edgecolor="0.8", zorder=0)
+climate_regions.boundary.plot(ax=ax, edgecolor="k", lw=3, zorder=1)
+
+basin_colors = {"NATL": "deeppink", "EPAC": "tab:purple", "WPAC": "y"}
+
+# plot nans using original numeric season column
+# added alpha=0 to make stations without TC linkage (peak season = nan) invisible
+stations[np.isnan(stations["results_original"])].plot(ax=ax, color="0.5", markersize=10)
+# make stations with ties gray
+stations[stations["results_original"] == 5].plot(ax=ax, color="w", markersize=50, edgecolor="black", zorder=100)
+
+
+# Plot basin-specific points
+for i, (basin, color) in enumerate(basin_colors.items()):
+    subset = gdf[gdf["results"] == basin]
+    if not subset.empty:
+        subset.plot(ax=ax, color=color, markersize=50, edgecolor="black", label=f'{basin} ({basin_numbers[i]:.1f}%)')
+# # Annotate each point with its station name
+# for x, y, label in zip(gdf.geometry.x, gdf.geometry.y, gdf['NAME']):
+#     ax.annotate(label, xy=(x, y), xytext=(3, 3), textcoords="offset points", fontsize=8)
+
+# custom legend with custom order (NATL, EPAC, WPAC), always include basins even if absent in data
+basin_percent = {"NATL": num_natl, "EPAC": num_epac, "WPAC": num_wpac}
+order = ["NATL", "EPAC", "WPAC"]
+
+handles = [
+    Line2D([0], [0], marker="o", linestyle="None",
+           markerfacecolor=basin_colors[s], markeredgecolor="black", color="none", markersize=8)
+    for s in order
+]
+labels = [f"{s} ({basin_percent[s]:.1f}%)" for s in order]
+
+plt.legend(handles, labels, loc="lower left", bbox_to_anchor=(-0.05, 0.08), fontsize=10)
+    
+#ax.set_title("Most common origin basin of TC-n2", fontsize=20, y=0.96)
+ax.set_axis_off()
+
+# Figure 3g
+
+variable = tc_stats.tc_dists
+
+# Add to DataFrame
+stations["results"] = variable
+stations["num_tc"] = tc_stats.num_tc
+
+# Load states
+states = gpd.read_file("cb_2018_us_state_5m.shp")
+states = states.to_crs("EPSG:4326")
+states = states[states.NAME.isin(["Alabama", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", 
+                                  "Florida", "Georgia", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", 
+                                  "Louisiana", "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota", 
+                                  "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", 
+                                  "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio", 
+                                  "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota", 
+                                  "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington", "West Virginia", 
+                                  "Wisconsin", "Wyoming"])]
+
+import matplotlib.colors as mcolors
+
+# Define bins and colormap
+bounds = np.arange(0, 500.1, 25)
+cmap = plt.cm.YlOrRd
+norm = mcolors.BoundaryNorm(boundaries=bounds, ncolors=cmap.N, clip=True)
+
+# Plotting
+fig, ax = plt.subplots(figsize=(10, 8))
+states.boundary.plot(ax=ax, edgecolor="0.8", zorder=0)
+climate_regions.boundary.plot(ax=ax, edgecolor="k", lw=3, zorder=1)
+stations[np.isnan(stations["results"])].plot(ax=ax, color="0.5", markersize=10)
+#stations[stations["results"] == 0].plot(ax=ax, color="w", markersize=50, edgecolor="black", alpha=0)
+#stations[stations["num_tc"] == 1].plot(ax=ax, color="w", markersize=50, edgecolor="black", zorder=99)
+stations[stations["results"] > 0].plot(ax=ax, column="results", cmap=cmap, norm=norm, # this works because the smallest actual dist is 28 km
+                                        markersize=50, edgecolor="black", vmin = 0, vmax = 500)
+
+# Add colorbar
+sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+cbar = plt.colorbar(sm, ax=ax, orientation="horizontal", aspect=35, fraction=0.025, pad=0.002, shrink=0.6,
+                    ticks=np.arange(0, 500.1, 50))
+cbar.ax.tick_params(labelsize=12)
+# Annotate each point with its station name
+# for x, y, label in zip(gdf.geometry.x, gdf.geometry.y, gdf['station']):
+#     ax.annotate(label, xy=(x, y), xytext=(3, 3), textcoords="offset points", fontsize=8)
+    
+
+#plt.title("Median TC distance", fontsize=20, y=0.96)
+ax.set_axis_off()
+plt.show()
+
